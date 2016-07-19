@@ -1,0 +1,14 @@
+[package]
+name = "mashup"
+version = "0.1.0"
+authors = ["Lars Eriksson <lars.eriksson@cygni.se>"]
+
+[features]
+meshup_mode_web=[]
+meshup_mode_save_web=[]
+
+[dependencies]
+hyper = "*"
+iron = "*"
+rustc-serialize = "*"
+url="*"
