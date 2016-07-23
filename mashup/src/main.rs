@@ -2,6 +2,13 @@ extern crate hyper;
 extern crate rustc_serialize;
 extern crate url;
 
+mod errors;
+mod structs;
+
+use errors::*;
+use errors::ResourceError::*;
+use structs::*;
+
 use std::fmt::{Display, Formatter};
 use hyper::client::{Client};
 use std::fs::File;
@@ -13,7 +20,6 @@ use std::sync::Arc;
 use rustc_serialize::{json, Decodable, Decoder};
 use hyper::mime::{Mime};
 use std::sync::mpsc;
-use ResourceError::*;
 use hyper::status::StatusCode;
 use url::Url;
 use std::fs;
@@ -21,6 +27,7 @@ use std::fs;
 //const TEST_ID : &'static str = "5b11f4ce-a62d-471e-81fc-a69a8278c7da";
 
 const USER_ARGENT: &'static str = "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36";
+
 
 macro_rules! println_stderr(
     ($($arg:tt)*) => { {
@@ -218,7 +225,7 @@ fn query_cover_art<F>(artist_id: String, list_of_references: Vec<AlbumReference>
 
 
 fn image_from_cover_art_response(payload : &str) -> String {
-	let body : self::CoverArtResponse = json::decode(&payload).unwrap();
+	let body : CoverArtResponse = json::decode(&payload).unwrap();
 
 	body.images.into_iter().find(|item| item.front).unwrap().image
 }
@@ -327,155 +334,7 @@ fn test_find_by_url() {
 	assert_eq!(None, Provider::find_by_url(&"http://google.com".to_string()))
 }
 
-#[derive(Debug)]
-enum ResourceError {
-	AlbumError{artist_id : String, album_id: String, album_title: Option<String>, cause : TypedIOError},
-	ArtistError{artist_id : String, cause : TypedIOError}
-}
 
-#[derive(Debug)]
-struct TypedIOError {
-	resource : String,
-	cause : hyper::Error
-}
-
-impl std::convert::From<ResourceError> for TypedIOError {
-	fn from(err: ResourceError) -> Self {
-		match err {
-			ArtistError {cause, ..} => cause,
-			AlbumError {cause, ..} => cause
-		}
-	}
-}
-
-impl Display for TypedIOError {
-	fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
-		write!(f, "Underlying IO Error when accessing {}: {}", self.resource, self.cause)
-	}
-}
-
-impl Display for ResourceError {
-	fn fmt(&self, f: &mut Formatter) -> Result<(),std::fmt::Error> {
-		match *self {
-			AlbumError {ref artist_id, ref album_id, ref cause, ..} => write!(f, "AlbumError for id={}-{}: {}", artist_id, album_id, cause),
-			ArtistError {ref artist_id, ref cause} => write!(f, "ArtistError for id={}: {}", artist_id, cause)
-		}
-	}
-}
-
-impl std::error::Error for TypedIOError {
-	fn description(&self) -> &str {
-		"Underyling IO Error"
-	}
-
-	fn cause(&self) -> Option<&std::error::Error> {
-		Some(&self.cause)
-	}
-}
-
-impl std::error::Error for ResourceError {
-	fn description(&self) -> &str {
-		match *self {
-			AlbumError {..} => "Error while parsing Album",
-			ArtistError {..} => "Error while parsing Artist"
-		}
-	}
-
-    fn cause(&self) -> Option<&std::error::Error> {
-		match *self {
-			AlbumError{ ref cause, ..} => Some(cause),
-			ArtistError{ ref cause, ..} => Some(cause)
-		}
-	}
-}
-
-#[derive(RustcDecodable, Debug)]
-struct CoverArtResponse {
-	images : Vec<self::Image>
-}
-
-#[derive(RustcDecodable, Debug)]
-struct Image {
-	front : bool,
-	image : String
-}
-
-#[derive(Debug, RustcEncodable)]
-struct ArtistReference {
-	name: String,
-	albums : Vec<AlbumReference>
-}
-
-#[derive(Debug, Clone, RustcEncodable)]
-struct AlbumReference {
-	id: String,
-	title: String,
-	image : Option<String>,
-	error : bool
-}
-
-impl AlbumReference {
-	fn with_image(&mut self, image : String) -> &AlbumReference {
-		self.image = Some(image);
-
-		self
-	}
-}
-
-impl std::convert::From<ResourceError> for AlbumReference {
-	fn from(r : ResourceError) -> Self {
-		match r {
-			AlbumError{album_id, album_title, ..} => AlbumReference {
-				id : album_id,
-				title: album_title.unwrap_or("".to_string()),
-				image : None,
-				error : true
-			},
-			ArtistError { .. } => unreachable!()
-		}
-	}
-}
-
-impl Decodable for ArtistReference {
-	fn decode<D : Decoder>(d: &mut D) -> Result<ArtistReference, D::Error> {
-		d.read_struct("ArtistReference", 2, |d| {
-			let name = try!(d.read_struct_field("name", 0, |d| d.read_str()));
-			let albums = try!(d.read_struct_field("release-groups", 0, |d| {
-				let buffer = d.read_seq(|d, len| {
-					let mut buffer = Vec::new();
-
-					for idx in 0..(len-1) {
-						let item: AlbumReference = try!(d.read_seq_elt(idx, Decodable::decode));
-						buffer.push(item);
-					};
-
-					Ok(buffer)
-				});
-
-				buffer
-			}));
-
-			Ok(ArtistReference {
-				name: name,
-				albums: albums
-			})
-		})
-	}
-}
-
-impl  Decodable for AlbumReference {
-	fn decode<D: Decoder>(d: &mut D) -> Result<AlbumReference, D::Error> {
-		d.read_struct("AlbumReference", 3, |d| {
-			Ok(AlbumReference{
-				id: try!(d.read_struct_field("id", 0, |d| d.read_str())),
-				title: try!(d.read_struct_field("title", 0, |d| d.read_str())),
-				//primary_type: try!(d.read_struct_field("primary-type", 0, |d| d.read_str())),
-				image: None,
-				error : false
-			})
-		})
-	}
-}
 
 #[cfg(not(feature="meshup_mode_web"))]
 fn query(id: &str) -> Result<ArtistReference, ResourceError> {
