@@ -9,25 +9,23 @@ use errors::*;
 use errors::ResourceError::*;
 use structs::*;
 
-use std::fmt::{Display, Formatter};
-use hyper::client::{Client};
+use hyper::client::Client;
 use std::fs::File;
 use hyper::header::*;
 use std::io::prelude::*;
 use std::path::Path;
 use std::thread;
 use std::sync::Arc;
-use rustc_serialize::{json, Decodable, Decoder};
+use rustc_serialize::json;
 use hyper::mime::{Mime};
 use std::sync::mpsc;
 use hyper::status::StatusCode;
 use url::Url;
-use std::fs;
+//use std::fs;
 
 //const TEST_ID : &'static str = "5b11f4ce-a62d-471e-81fc-a69a8278c7da";
 
 const USER_ARGENT: &'static str = "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36";
-
 
 macro_rules! println_stderr(
     ($($arg:tt)*) => { {
@@ -42,7 +40,7 @@ macro_rules! musicbrainz_url {
 }
 
 macro_rules! musicbrainz_file {
-	($id : expr) => ( format!("tmp/mb_{}.json", $id))
+	($id : expr) => ( format!("mb_{}.json", $id))
 }
 
 macro_rules! cover_art_url {
@@ -50,32 +48,17 @@ macro_rules! cover_art_url {
 }
 
 macro_rules! cover_art_file {
-	($id : expr) => ( format!("tmp/ca_{}.json", $id) )
-}
-
-fn read_from_file(url : &str) -> Result<String, TypedIOError> {
-	let path = Path::new(url);
-	let mut content = String::new();
-
-	File::open(&path)
-		.and_then(|mut file| file.read_to_string(&mut content))
-		.map(|_| {
-			//return the content rather than the size
-			content
-		})
-		.map_err(|err| TypedIOError {
-			resource : url.to_string(),
-			cause : hyper::Error::from(err)
-		})
+	($id : expr) => ( format!("ca_{}.json", $id) )
 }
 
 #[allow(dead_code)]
+#[allow(unused_must_use)]
 fn filter_successful(resource: &str, mut resp : hyper::client::response::Response) -> Result<String, TypedIOError>
 {
 	match resp.status {
 		StatusCode::Ok => {
 			let mut s = String::new();
-			resp.read_to_string(&mut s);
+            resp.read_to_string(&mut s);
 
 			Ok(s)
 		},
@@ -87,97 +70,214 @@ fn filter_successful(resource: &str, mut resp : hyper::client::response::Respons
 }
 
 #[allow(dead_code)]
-fn save_response_to_file(url : &str, content : &str) {
-	let provider = Provider::find_by_url(url).unwrap();
-	let id = Provider::extract_id(url);
-
-	fs::create_dir_all("tmp");
-
-	let path = Path::new("tmp").join(provider.format_file_name(&id));
-
-	if !path.exists() {
-		let f = File::create(path)
-			.and_then(|mut f| f.write_all(content.as_bytes()));
-
-		println_stderr!("saving file {:?}", f);
-	}
+struct SimpleFs {
+    directory : String
 }
 
+#[allow(dead_code)]
+#[allow(unused_must_use)]
+impl SimpleFs {
+    fn read(&self, id: String) -> Result<String, TypedIOError> {
+        std::fs::create_dir_all(Path::new(&self.directory));
 
-fn read_from_url(url : &str) -> Result<String, TypedIOError> {
-	println_stderr!("invoking {}", url);
+        let path = Path::new(&self.directory).join(id);
 
-	let client = Client::new();
-	let mime: Mime = "text/json".parse().unwrap();
+        read_resource_from_file(path.as_path())
+    }
 
-	let mut response = client.get(url)
-		.header(ContentType::json())
-		.header(UserAgent(USER_ARGENT.to_owned()))
-		.header(Connection::keep_alive())
-		.header(Accept(vec![qitem(mime)]))
-		.send()
-		.map_err(|err| TypedIOError {
-			resource : url.to_string(),
-			cause : err
-		})
-		.and_then(|resp| filter_successful(url, resp))
-		.map(|resp| {
-			if cfg!(feature="meshup_mode_save_web") {
-				save_response_to_file(url, &resp);
-			}
+    fn store(&self, id : &str, content: &str) {
+        std::fs::create_dir_all(Path::new(&self.directory));
 
-			resp
-		});
+        let path = Path::new(&self.directory).join(id);
 
-	response
+        if !path.exists() {
+            File::create(path)
+    			.and_then(|mut f| f.write_all(content.as_bytes()));
+        };
+    }
 }
 
-//TODO: define trait
-fn query_mb_from_file(id : &str) -> Result<ArtistReference, ResourceError> {
-	let mb_file = musicbrainz_file!(id);
-	let mb_response = try!(read_from_file(&mb_file).map_err(|err| {
-		ArtistError {
-			artist_id : id.to_string(),
-			cause: err.into()
-		}
-	}));
+#[allow(unused_must_use)]
+#[allow(dead_code)]
+fn save_response_to_file(url : &str, content : &str, provider : &Provider) {
+    let fs = provider.fs();
+	let id = provider.extract_id(url);
 
-	let artist_ref = process_mb_response(&mb_response);
-	let albums = query_cover_art(id.to_string(), artist_ref.albums, |id| {
-		let file_name = cover_art_file!(id);
-
-		read_from_file(&file_name)
-	});
-
-	Ok(ArtistReference {
-		name: artist_ref.name,
-		albums: albums
-	})
+    fs.store(&provider.format_file_name(&id), content);
 }
 
-fn query_mb_from_web(id: &str) -> Result<ArtistReference, ResourceError> {
-	let mb_query_url = musicbrainz_url!(id);
-	let mb_response = try!(read_from_url(&mb_query_url).map_err(|err| ArtistError {
-		artist_id: id.to_string(),
-		cause: err
-	}));
+trait Meshup {
+    fn artist_resource_by_id (&self, id : &str) -> String;
 
-	let artist_id = id.to_string();
-	let artist_ref = process_mb_response(&mb_response);
-	let albums = query_cover_art(artist_ref.name.clone(), artist_ref.albums, |id| {
-		let url = cover_art_url!(id);
-		read_from_url(&url)
-	});
+    fn album_resource_by_id (&self, id : &str) -> String;
 
-	Ok(ArtistReference {
-		name : artist_ref.name.clone(),
-		albums : albums
-	})
+    fn query(&self, id : &str) -> Result<ArtistReference, ResourceError>;
+
+    fn query_cover_art<F>(&self, artist_id: String, list_of_references: Vec<AlbumReference>, cover_art: F) -> Vec<AlbumReference>
+    	where F: Send + 'static + Fn(&str)->Result<String, TypedIOError> + Sync {
+    	let album_references = Arc::new(list_of_references);
+    	let shareable_cover_art = Arc::new(cover_art);
+
+    	let threads : Vec<_> = album_references.clone().iter().map(|album_reference| {
+    		let mut album = album_reference.clone();
+    		let (tx, rx): (mpsc::Sender<Result<AlbumReference, ResourceError>>, mpsc::Receiver<Result<AlbumReference, ResourceError>>) = mpsc::channel();
+    		let child_cover_art = shareable_cover_art.clone();
+
+    		let artist_id = artist_id.to_string();
+    		let album_id = album.id.clone();
+    		let album_title = album.title.clone();
+
+    		thread::spawn(move || {
+    			let result = child_cover_art(&album_id)
+    				.map(|resp| {
+    					album.with_image(image_from_cover_art_response(&resp));
+
+    					album
+    				})
+    				.map_err(|err| ResourceError::AlbumError {
+    					artist_id : artist_id,
+    					album_id: album_id,
+    					album_title : Some(album_title),
+    					cause: TypedIOError::from(err)
+    				});
+
+    			tx.send(result)
+    		});
+
+    		rx
+    	}).collect();
+
+
+    	let updated_album_refs: Vec<AlbumReference> = threads.into_iter().map(|thread| {
+    		let item = thread.recv().unwrap();
+
+    		item.unwrap_or_else(|err| {
+    			println_stderr!("{}", err);
+    			AlbumReference::from(err)
+    		})
+    	}).collect();
+
+    	updated_album_refs
+    }
 }
 
+struct FileMeshup;
+struct WebMeshup;
 
+
+fn read_resource_from_url(url : &str, provider : &Provider) -> Result<String, TypedIOError> {
+    println_stderr!("invoking {}", url);
+
+    let client = Client::new();
+    let mime: Mime = "text/json".parse().unwrap();
+
+    let response = client.get(url)
+        .header(ContentType::json())
+        .header(UserAgent(USER_ARGENT.to_owned()))
+        .header(Connection::keep_alive())
+        .header(Accept(vec![qitem(mime)]))
+        .send()
+        .map_err(|err| TypedIOError {
+            resource : url.to_string(),
+            cause : err
+        })
+        .and_then(|resp| filter_successful(url, resp))
+        .map(|resp| {
+            if cfg!(feature="meshup_mode_save_web") {
+                save_response_to_file(url, &resp, provider);
+            }
+
+            resp
+        });
+
+    response
+}
+
+impl Meshup for WebMeshup {
+    fn album_resource_by_id (&self, id : &str) -> String {
+        cover_art_url!(id)
+    }
+
+    fn artist_resource_by_id (&self, id : &str) -> String {
+        musicbrainz_url!(id)
+    }
+
+    fn query(&self, id : &str) -> Result<ArtistReference, ResourceError> {
+        let mb_query_url = self.artist_resource_by_id(id);
+
+        print!("{}", mb_query_url);
+
+    	let mb_response = try!(read_resource_from_url(&mb_query_url, &Provider::Musicbrainz).map_err(|err| ArtistError {
+    		artist_id: id.to_string(),
+    		cause: err
+    	}));
+
+    	let artist_ref = process_mb_response(&mb_response);
+    	let albums = self.query_cover_art(artist_ref.name.clone(), artist_ref.albums, |id| {
+    		let url = cover_art_url!(id);
+    		read_resource_from_url(&url, &Provider::CoverArt)
+    	});
+
+    	Ok(ArtistReference {
+    		name : artist_ref.name.clone(),
+    		albums : albums
+    	})
+    }
+}
+
+fn read_resource_from_file(path : &Path) -> Result<String, TypedIOError> {
+    let mut content = String::new();
+
+    File::open(&path)
+        .and_then(|mut file| file.read_to_string(&mut content))
+        .map(|_| {
+            //return the content rather than the size
+            content
+        })
+        .map_err(|err| TypedIOError {
+            resource : path.to_str().unwrap_or("").to_string(),
+            cause : hyper::Error::from(err)
+        })
+}
+
+impl Meshup for FileMeshup {
+    fn album_resource_by_id (&self, id : &str) -> String {
+        musicbrainz_file!(id)
+    }
+
+    fn artist_resource_by_id (&self, id : &str) -> String {
+        cover_art_file!(id)
+    }
+
+    fn query (&self, id : &str) -> Result<ArtistReference, ResourceError> {
+        let mb_file = self.album_resource_by_id(id);
+        let fs = Provider::Musicbrainz.fs();
+
+    	let mb_response = try!(fs.read(mb_file).map_err(|err| {
+    		ArtistError {
+    			artist_id : id.to_string(),
+    			cause: err.into()
+    		}
+    	}));
+
+    	let artist_ref = process_mb_response(&mb_response);
+    	let albums = self.query_cover_art(id.to_string(), artist_ref.albums, |id| {
+    		let file_name = cover_art_file!(id);
+            let fs = Provider::CoverArt.fs();
+
+            fs.read(file_name)
+    	});
+
+    	Ok(ArtistReference {
+    		name: artist_ref.name,
+    		albums: albums
+    	})
+    }
+}
+
+#[allow(dead_code)]
 fn query_cover_art<F>(artist_id: String, list_of_references: Vec<AlbumReference>, cover_art: F) -> Vec<AlbumReference>
-	where F: Send + 'static + Fn(&String)->Result<String, TypedIOError> + Sync {
+	where F: Send + 'static + Fn(&str)->Result<String, TypedIOError> + Sync {
 	let album_references = Arc::new(list_of_references);
 	let shareable_cover_art = Arc::new(cover_art);
 
@@ -246,64 +346,31 @@ fn process_mb_response(payload: &str) -> ArtistReference {
 	a
 }
 
-
-#[allow(dead_code)]
-#[derive(Debug)]
 enum Provider {
-	MUSICBRAINZ, COVER_ART
+    Musicbrainz,
+    CoverArt
 }
 
-//it must be a better way to express it
-impl std::cmp::PartialEq<Provider> for Provider {
-	fn eq(&self, other: &Provider) -> bool {
-		match *self {
-			Provider::COVER_ART => match *other {
-				Provider::COVER_ART => true,
-				Provider::MUSICBRAINZ => false
-			},
-			Provider::MUSICBRAINZ => match *other {
-				Provider::COVER_ART => false,
-				Provider::MUSICBRAINZ => true
-			}
-		}
-	}
-}
-
-#[allow(dead_code)]
 impl Provider {
-	fn extract_id(url: &str) -> String {
+    fn fs(&self) -> SimpleFs {
+        match *self {
+            Provider::Musicbrainz => SimpleFs { directory : "tmp".to_string() },
+            Provider::CoverArt => SimpleFs { directory : "tmp".to_string() }
+        }
+    }
+
+    fn extract_id(&self, url: &str) -> String {
 		let parsed : Url = Url::parse(url).unwrap();
 
 		parsed.path_segments().unwrap().last().unwrap().to_string()
 	}
 
-	fn find_by_url(url: &str) -> Option<Provider> {
-		let extract_id = Provider::extract_id(url);
-
-		if Provider::MUSICBRAINZ.format_url(&extract_id) == url {
-			return Some(Provider::MUSICBRAINZ)
-		}
-
-		if Provider::COVER_ART.format_url(&extract_id) == url {
-			return Some(Provider::COVER_ART)
-		}
-
-		None
-	}
-
-	fn format_url(&self, id: &str) -> String {
-		match *self {
-			Provider::MUSICBRAINZ => musicbrainz_url!(id),
-			Provider::COVER_ART => cover_art_url!(id)
-		}
-	}
-
-	fn format_file_name(&self, id: &str) -> String {
-		match *self {
-			Provider::MUSICBRAINZ => format!("mb_{}.json", id),
-			Provider::COVER_ART => format!("ca_{}.json", id)
-		}
-	}
+    fn format_file_name (&self, id : &str) -> String {
+        match *self {
+            Provider::Musicbrainz => musicbrainz_file!(id),
+            Provider::CoverArt => cover_art_file!(id)
+        }
+    }
 }
 
 
@@ -315,44 +382,28 @@ fn test_extract_id_from_url() {
 }
 
 #[test]
-fn test_format_url() {
-	assert_eq!("http://musicbrainz.org/ws/2/artist/123?&fmt=json&inc=url-rels+release-groups", Provider::MUSICBRAINZ.format_url("123"));
-	assert_eq!("http://coverartarchive.org/release-group/123", Provider::COVER_ART.format_url("123"));
-
-}
-
-#[test]
 fn test_format_file_name() {
 	assert_eq!("ca_123", Provider::COVER_ART.format_file_name("123"));
 	assert_eq!("mb_123", Provider::MUSICBRAINZ.format_file_name("123"));
-}
-
-#[test]
-fn test_find_by_url() {
-	let test_url = Provider::MUSICBRAINZ.format_url("123");
-	assert_eq!(Some(Provider::MUSICBRAINZ), Provider::find_by_url(&test_url));
-	assert_eq!(None, Provider::find_by_url(&"http://google.com".to_string()))
 }
 
 
 
 #[cfg(not(feature="meshup_mode_web"))]
 fn query(id: &str) -> Result<ArtistReference, ResourceError> {
-	query_mb_from_file(id)
+    FileMeshup.query(id)
 }
 
 #[cfg(feature="meshup_mode_web")]
 fn query(id: &str) -> Result<ArtistReference, ResourceError> {
-	query_mb_from_web(id)
+	WebMeshup.query(id)
 }
 
 fn main() {
 	let args : Vec<String> = std::env::args().into_iter().collect();
 	let id = &args[1];
 
-//	let response = query_mb_from_file(id);
 	let web_response = query(id).unwrap();
 
-//	print!("{:?}", response);
 	print!("{}", json::encode(&web_response).unwrap())
 }
